@@ -1,0 +1,236 @@
+---
+title: "EDA"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+
+# Predefined personal color schemes
+colors60s <- c("#BF4402", "#94058E", "#005DD7", "#2690C3", "#F5C402", "#CE378E")
+
+# Predefined theme
+my_theme <- theme(plot.background = element_rect(fill = "grey97", color = "grey25"),
+        panel.background = element_rect(fill = "grey97"),
+        panel.grid.major = element_line(colour = "grey87"),
+        text = element_text(color = "grey25"),
+        plot.title = element_text(size = 18),
+        plot.subtitle = element_text(size = 14),
+        axis.title = element_text(size = 11),
+        legend.box.background = element_rect(color = "grey25", fill = "grey97", size = 0.5),
+        legend.box.margin = margin(t = 5, r = 5, b = 5, l = 5))
+```
+
+#Import data and change variables type
+```{r}
+library(dplyr)
+
+data = read.delim('/Users/xm/Desktop/assignment_keye/data2.txt', header = TRUE, sep = ',', dec = '.') %>%
+  mutate(
+    Location = factor(Location),
+    Restaurant = factor(Restaurant),
+    Wiring = factor(Wiring),
+    Exercise = factor(Exercise),
+    FirmType = factor(FirmType),
+    Renewable = factor(Renewable)
+  )
+
+levels(data$FirmType)[1] = 'BUS'
+
+summary(data)
+```
+
+#Check missing data
+```{r}
+missing_row = data[!complete.cases(data),]
+head(missing_row)
+```
+
+#There is no missing value in the dataset
+
+#Delete the obvious wrong data point(RentTotal is negative number)
+```{r}
+data = data[data$RentTotal>0,]
+```
+
+
+#summary of respond variable
+```{r}
+# Draw a higtogram to figure out the distribution of RentTotal
+options(scipen=10000)
+ggplot(data, aes(x = RentTotal, fill = ..count..)) +
+  geom_histogram(binwidth = 100000) +
+  ggtitle("Figure1 Histogram of RentTotal") +
+  ylab("Count of leased properties") +
+  xlab("Total annual rent") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+#From the histogram above, the distriubtion of our respond variable is right skewed. Thus, we can do a log transformation of it.
+
+#log term of RentTotal
+```{r}
+data$LRentTotal = log(data$RentTotal)
+```
+
+```{r}
+options(scipen=10000)
+ggplot(data, aes(x = LRentTotal, fill = ..count..)) +
+  geom_histogram(binwidth = 0.5) +
+  ggtitle("Figure 2 Histogram of LRentTotal") +
+  ylab("Count of leased properties") +
+  xlab("Total annual rent") + 
+  theme(plot.title = element_text(hjust = 5))
+```
+#After conversion, the LRentTotal is more normally distributed now
+
+
+#extract numeric predictors and inspect variables correlation  
+```{r}
+X = data %>%
+  select(-c(1, 9, 10, 14, 15, 16, 18, 20))
+
+library(corrplot)
+
+#get correlation matrix 
+M = cor(X)
+
+#get p-value matrix and confidence intervals matrix
+testRes = cor.mtest(X, conf.level = 0.95)
+
+corrplot(M, p.mat = testRes$p, method = 'circle', type = 'lower', insig='blank',
+         order = 'AOE', diag = FALSE)$corrPos -> p1
+text(p1$x, p1$y, round(p1$corr, 2))
+
+```
+#DistAirp and DriveAirp are highly correlated(correlation coefficient =  0.97), and it migth diffuse feature importance later. Thus, we delete variable DriveAirp.
+```{r}
+data = data[,-8]
+```
+
+#Delete outliers by Mahalanobis distance
+#Becasue we have multiple predictors here, so when we decide if an observation is an outlier, we'd better to collectively consider multiple variables that matter.
+#So I choose to detect outliers based on Mahalanobis distance, which allows us to declare an observation as an outlier based on all continuous predictors.
+#Basically, Mahalanobis distance is a multi-dimensional generalization of outlier detection by Z-score.
+```{r}
+X = data %>%
+  select(-c(1, 8, 9, 13, 14, 15, 17, 19))
+
+#calculate Mahalanobis distance and corresponding p-val
+X$mahal = mahalanobis(X, colMeans(X), cov(X))
+X$p <- pchisq(X$mahal, df=ncol(X), lower.tail=FALSE)
+
+#consider observations with p-val less than 0.001 to be outliers
+outliers = X[X$p < 0.001, ]
+outliers
+```
+
+```{r}
+#Delete these outliers
+data = data[-c(20, 21, 217, 219), ]
+```
+
+
+#initial a RF model
+```{r}
+library(randomForest)
+set.seed(18)
+rfmod <- randomForest(RentTotal ~ ., data = data, 
+                   importance =TRUE,ntree=500,nodesize=10, na.action=na.roughfix)
+
+options(repr.plot.width=9, repr.plot.height=6)
+varImpPlot(rfmod, type=1)
+```
+
+
+
+
+# Create feature importance
+```{r}
+library(radiant.data)
+library(caret)
+
+var_imp = varImp(rfmod, type = 1)
+
+var_imp %>%
+  rownames_to_column("Feature") %>%
+  
+  ggplot(aes(x = reorder(Feature, Overall), y = Overall)) +
+  geom_bar(stat = "identity", aes(fill = Overall)) +
+  coord_flip() +
+  geom_label(aes(label = round(Overall, 2)), size = 3) +
+  scale_fill_gradient(low = colors60s[4], high = colors60s[2], guide = "none") +
+  my_theme +
+  labs(x = "Feature", y = "Importance", title = "Feature Importance", subtitle = "in descending order - %IncMSE")
+```
+#The top 3 foctors that determine rent are SqftLease, Parking, and FirmType. I compute the feature imporatnce based on %IncMSE. It is the increase in MSE(Mean Squared Error) of predictions as a result of one variable being permuted. So the higher %IncMSE of one variable is, the more important it is.
+
+#boxplot
+```{r}
+# Change plot size to 9 x 6
+options(repr.plot.width=9, repr.plot.height=6)
+
+#boxplot of RentTotal by FirmType
+#add average value of RentTotal as red point
+ggplot(data, aes(x=FirmType, y=RentTotal, fill=FirmType)) + 
+  geom_boxplot(alpha=0.3) +
+  stat_summary(fun=mean, geom="point", shape=20, size=4, color="red", fill="red")+
+  theme(legend.position="none")+
+  ggtitle("Boxplot of RentTotal by FirmType")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+```{r}
+library(plyr)
+library(dplyr)
+library(scales)
+
+ddply(data, .(FirmType), summarize,  avg.size=round(mean(RentTotal), 0))
+
+ggplot(data) +
+stat_summary(aes(x = FirmType, y = RentTotal), fun = mean,
+geom = 'bar', col = 'black', fill = 'steelblue3') + ylab('Average Size')
+
+```
+#It's obvious that the Doctor Firm has much smllaer average size of the lease than Bus Firm, which verified our assumption above.
+#So Bus Firm tends to rent properties with higher rent, followed by Government Firm, legal Firm, and Doctor Firm in Descending order, and it's affected by the size of the lease, like the Bus Firm has the highest size of lease.
+
+
+
+#Residual Analysis
+```{r}
+x = data %>% select(-c('RentTotal'))
+y = data %>% select(RentTotal)
+
+#predict the rent
+y$ypred = predict(rfmod, x)
+
+#compute bias
+y$bias = y$RentTotal - y$ypred
+#If the bias > 0, it means property is overpaid.
+#Otherwise, bias < 0, means that property is underpaid.
+```
+
+```{r}
+#combine tables
+data_bias = merge(y, data, by='RentTotal')
+```
+
+```{r}
+#visulization
+ggplot(data_bias, aes(x=RentTotal, y=bias, color = FirmType)) + 
+  geom_point() + geom_rug() + xlab('True Rent') + ylab('Bias')
+```
+#From the above figure, we can see that when majority type of firms in the building is Bus Firm, the property with high rent there are more likely to be overpaid.
+
+
+```{r}
+ggplot(data_bias, aes(x=RentTotal, y=bias, color = FirmType)) +
+  geom_point() +
+  coord_flip() + 
+  facet_wrap(FirmType~., ncol = 2) + 
+  labs(y = 'Spending (in millions $)', x = 'Expense Category', title = 'Total spending in each expense category by fund type') +
+  scale_y_continuous(limits = c(-400000, 1200000))
+```
+
+
